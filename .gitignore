@@ -1,0 +1,63 @@
+# Python environments and caches
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local settings and credentials
+.env
+.env.*
+!.env.example
+.netrc
+.npmrc
+.pypirc
+secrets/
+credentials/
+*.pem
+*.key
+*.p12
+*.pfx
+*.secret
+*.credentials
+
+# Logs
+*.log
+logs/
+
+# ElectroRAG user data
+/data/datasheets/
+/data/chroma_db/
+
+# Generated model and index artifacts
+/models/
+/model_cache/
+/artifacts/
+/indexes/
+/embeddings/
+/data/models/
+/data/model_cache/
+/data/artifacts/
+/data/indexes/
+/data/embeddings/
+*.gguf
+*.safetensors
+*.pt
+*.pth
+*.onnx
+*.faiss
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.sqlite
+*.sqlite3
+*.db
