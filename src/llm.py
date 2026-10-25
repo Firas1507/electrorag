@@ -32,7 +32,7 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "qwen3:8b"
 
 # Maximum number of generated tokens.
-MAX_TOKENS = 1024
+MAX_TOKENS = 512
 
 # Request timeout in seconds.
 TIMEOUT = 180

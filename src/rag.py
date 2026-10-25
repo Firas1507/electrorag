@@ -39,7 +39,7 @@ from src.retriever import open_collection
 # ============================================================
 
 # Number of reranked chunks passed to the generator.
-CONTEXT_CHUNKS = 5
+CONTEXT_CHUNKS = 3
 
 # Print retrieval/debug information.
 DEBUG = True

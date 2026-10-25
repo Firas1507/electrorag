@@ -29,7 +29,9 @@ if MODE not in {"mock", "live"}:
 
 # Ollama (local only)
 OLLAMA_URL = os.environ.get("ELECTRORAG_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
-OLLAMA_MODEL = os.environ.get("ELECTRORAG_OLLAMA_MODEL", "qwen3:8b")
+# The 4B model is substantially faster for short, citation-focused answers.
+# Override with ELECTRORAG_OLLAMA_MODEL when higher answer quality is preferred.
+OLLAMA_MODEL = os.environ.get("ELECTRORAG_OLLAMA_MODEL", "qwen3.5:4b")
 
 # ---- ADAPT: where your existing index and PDFs live -----------------------------------------
 CHROMA_DIR = _env_path("ELECTRORAG_CHROMA_DIR", PROJECT_ROOT / "data" / "chroma_db")
