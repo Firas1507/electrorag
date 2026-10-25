@@ -1,0 +1,7 @@
+streamlit>=1.40
+pandas
+chromadb
+pymupdf
+rank-bm25
+requests
+sentence-transformers

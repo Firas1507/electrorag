@@ -13,7 +13,13 @@ what it deliberately does not.
 
 import unittest
 
-from src.benchmark import citation_page_context_valid, citation_validation_problems
+from src.benchmark import (
+    citation_page_context_valid,
+    citation_validation_problems,
+    format_rate,
+    is_abstention_answer,
+    summarize_citation_metrics,
+)
 from src.citation_resolver import resolve_citations
 from src.citation_validation import validate_citations
 
@@ -55,7 +61,7 @@ class AuditCaseTests(unittest.TestCase):
         r = ok("VDD is 3.0 V to 3.6 V [ESP32-S3.pdf, p. 12].")
         self.assertFalse(r.valid)
         self.assertEqual(r.identity, [])
-        self.assertEqual(len(r.support), 1)
+        self.assertTrue(r.support)
 
     def test_case4_uncited_claim_with_citation_elsewhere_fails(self):
         r = ok("VDD is 3.0 V to 3.6 V. Crystal is 40 MHz [ESP32-S3.pdf, p. 12].")
@@ -88,6 +94,59 @@ class BenchmarkWrapperTests(unittest.TestCase):
 
     def test_correct_answer_still_passes(self):
         self.assertTrue(self.check("VDD is 3.0 V to 3.6 V [ESP32-S3.pdf, p. 64]."))
+
+    def test_configured_abstention_is_not_a_citation_failure(self):
+        self.assertTrue(is_abstention_answer(NOT_FOUND))
+        self.assertTrue(self.check(NOT_FOUND))
+        self.assertEqual(
+            citation_validation_problems(NOT_FOUND, SRC, CTX),
+            [],
+        )
+
+    def test_genuine_uncited_answer_still_fails(self):
+        answer = "VDD is 3.0 V to 3.6 V."
+        self.assertFalse(is_abstention_answer(answer))
+        self.assertFalse(self.check(answer))
+        self.assertIn(
+            "answer contains no citations",
+            citation_validation_problems(answer, SRC, CTX),
+        )
+
+    def test_citation_rates_exclude_abstentions_from_the_denominator(self):
+        metrics = summarize_citation_metrics(
+            [
+                {
+                    "abstained": True,
+                    "citation": False,
+                    "citation_source": False,
+                    "citation_page_context": False,
+                },
+                {
+                    "abstained": False,
+                    "citation": True,
+                    "citation_source": True,
+                    "citation_page_context": True,
+                },
+                {
+                    "abstained": False,
+                    "citation": False,
+                    "citation_source": False,
+                    "citation_page_context": False,
+                },
+                {
+                    "abstained": True,
+                    "citation": False,
+                    "citation_source": False,
+                    "citation_page_context": False,
+                },
+            ]
+        )
+
+        self.assertEqual(metrics["answer_count"], 4)
+        self.assertEqual(metrics["abstention_count"], 2)
+        self.assertEqual(metrics["non_abstained_count"], 2)
+        self.assertEqual(metrics["citation_page_context_count"], 1)
+        self.assertEqual(format_rate(1, metrics["non_abstained_count"]), "1/2 = 50.00%")
 
     def test_problems_are_reported_as_text(self):
         problems = citation_validation_problems(
@@ -198,13 +257,19 @@ class SupportLayerLimitsTests(unittest.TestCase):
         self.assertEqual(len(r.support), 1)
         self.assertIn("4.2", r.support[0])
 
-    def test_wrong_attribution_of_a_present_number_is_NOT_caught(self):
-        # 85 does appear on page 64, so numeric presence cannot tell that it is
-        # a temperature and not a voltage. This is a documented limitation.
-        self.assertTrue(ok("The maximum supply voltage is 85 V [ESP32-S3.pdf, p. 64].").valid)
+    def test_wrong_attribution_of_a_present_number_is_rejected(self):
+        # The cited page contains 85 °C, but its operating-condition text does
+        # not support calling that value a supply voltage.
+        self.assertFalse(
+            ok(
+                "The maximum supply voltage is 85 V [ESP32-S3.pdf, p. 64]."
+            ).valid
+        )
 
-    def test_claims_without_a_number_and_unit_are_not_judged(self):
-        self.assertTrue(ok("The chip has a dual-core CPU [ESP32-S3.pdf, p. 64].").valid)
+    def test_unsupported_non_numeric_claim_is_rejected(self):
+        self.assertFalse(
+            ok("The chip has a dual-core CPU [ESP32-S3.pdf, p. 64].").valid
+        )
 
 
 if __name__ == "__main__":

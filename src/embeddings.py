@@ -26,9 +26,13 @@ def load_model(model_name: str = MODEL_NAME) -> SentenceTransformer:
     return SentenceTransformer(model_name)
 
 
-def get_all_chunks() -> List[Dict[str, Any]]:
-    """Run the loader + chunker and return every chunk."""
-    pages = load_all_pdfs()
+def get_all_chunks(strict: bool = False) -> List[Dict[str, Any]]:
+    """Run the loader + chunker and return every chunk.
+
+    Strict loading propagates PDF extraction errors so indexing cannot
+    synchronize an incomplete set of chunks.
+    """
+    pages = load_all_pdfs(strict=strict)
     chunks = chunk_documents(pages)
     if not chunks:
         raise RuntimeError("No chunks produced. Put at least one text PDF in data/datasheets/.")

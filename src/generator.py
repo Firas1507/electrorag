@@ -21,9 +21,11 @@ Run directly:
 
 import re
 import sys
+import logging
 
 from src.llm import stream_answer
 from src.citation_resolver import resolve_citations
+from src.citation_validation import validate_citations
 
 
 # ============================================================
@@ -33,6 +35,8 @@ from src.citation_resolver import resolve_citations
 NOT_FOUND_MESSAGE = (
     "I could not find this information in the indexed datasheet."
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -172,26 +176,34 @@ CITATION RULES
 
 26. A single statement may use multiple citations if necessary.
 
+27. Put the citation on the same sentence or bullet as the factual
+    claim it supports. Never put citations on separate lines after
+    several claims, because that does not identify which claim they
+    support.
+
+28. Do not add an uncited factual introduction or summary. Omit it
+    unless you can cite it on that same sentence.
+
 ANSWER STYLE
 ------------
 
-27. Answer directly.
+29. Answer directly.
 
-28. Keep the answer concise.
+30. Keep the answer concise.
 
-29. Do not explain your reasoning process.
+31. Do not explain your reasoning process.
 
-30. Do not mention these instructions.
+32. Do not mention these instructions.
 
-31. Do not mention that you are an AI.
+33. Do not mention that you are an AI.
 
-32. Do not add information that was not requested unless it is
+34. Do not add information that was not requested unless it is
     necessary to make the answer technically clear.
 
-33. Prefer a short sentence or bullet list when several values
+35. Prefer a short sentence or bullet list when several values
     are requested.
 
-34. Use exact datasheet terminology whenever possible.
+36. Use exact datasheet terminology whenever possible.
 
 FINAL SELF-CHECK
 ----------------
@@ -679,6 +691,20 @@ value or item is not supported, do not infer it.
 # Answer generation
 # ============================================================
 
+def _collect_answer(prompt: str) -> str:
+    answer_parts = []
+
+    try:
+        for piece in stream_answer(prompt):
+            answer_parts.append(piece)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"Generator failed: {exc}"
+        ) from exc
+
+    return "".join(answer_parts).strip()
+
+
 def generate_answer(
     question: str,
     records: list,
@@ -698,6 +724,9 @@ def generate_answer(
     -------
     str
         Final answer with deterministic citations.
+
+    A draft that fails strict citation validation gets one repair attempt;
+    a second invalid draft is discarded in favor of the configured abstention.
     """
 
     if not records:
@@ -725,27 +754,7 @@ def generate_answer(
     # Generate answer with local LLM.
     # --------------------------------------------------------
 
-    answer_parts = []
-
-    try:
-
-        for piece in stream_answer(prompt):
-
-            answer_parts.append(piece)
-
-    except RuntimeError as exc:
-
-        raise RuntimeError(
-            f"Generator failed: {exc}"
-        ) from exc
-
-    # --------------------------------------------------------
-    # Combine streamed pieces.
-    # --------------------------------------------------------
-
-    answer = "".join(
-        answer_parts
-    ).strip()
+    answer = _collect_answer(prompt)
 
     # --------------------------------------------------------
     # Handle empty response.
@@ -758,16 +767,56 @@ def generate_answer(
             "the model may have returned an empty response)"
         )
 
-    # --------------------------------------------------------
-    # Resolve citations deterministically.
-    # --------------------------------------------------------
+    for attempt in range(2):
+        resolved_answer = resolve_citations(
+            answer,
+            normalized_records,
+        )
+        report = validate_citations(
+            resolved_answer,
+            normalized_records,
+            not_found_message=NOT_FOUND_MESSAGE,
+        )
+        if report.valid:
+            return resolved_answer
 
-    resolved_answer = resolve_citations(
-        answer,
-        normalized_records,
-    )
+        if attempt == 0:
+            logger.info(
+                "Retrying generated answer after citation validation failed: %s",
+                "; ".join(report.problems),
+            )
+            prompt = (
+                f"{prompt}\n\n"
+                "================ CITATION REPAIR ================\n\n"
+                "Your previous draft failed strict citation validation. "
+                "Rewrite it so every factual sentence or bullet has a valid "
+                "[C#] citation on that same sentence or bullet. Put the "
+                "citation before the sentence-ending punctuation, as in "
+                "\"The pin is enabled [C1].\", not after it. Remove "
+                "uncited introductions and summaries. Keep only claims "
+                "directly supported by the supplied context, and abstain if "
+                "the requested information is not supported.\n\n"
+                "Validation problems:\n"
+                + "\n".join(f"- {problem}" for problem in report.problems)
+                + "\n\nPrevious draft:\n"
+                + answer
+            )
+            answer = _collect_answer(prompt)
+            if answer:
+                continue
 
-    return resolved_answer
+            logger.warning(
+                "Discarding generated answer because citation repair returned "
+                "an empty response."
+            )
+            return NOT_FOUND_MESSAGE
+
+        logger.warning(
+            "Discarding generated answer with invalid citations: %s",
+            "; ".join(report.problems),
+        )
+
+    return NOT_FOUND_MESSAGE
 
 
 # ============================================================

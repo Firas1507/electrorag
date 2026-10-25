@@ -61,3 +61,12 @@ logs/
 *.sqlite
 *.sqlite3
 *.db
+
+# Local agent/editor metadata
+/.agents/
+/.claude/
+
+# Generated archives and GUI caches
+*.zip
+**/__pycache__/
+.streamlit/secrets.toml

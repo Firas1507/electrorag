@@ -34,11 +34,15 @@ def _describe_empty_page(page: "pymupdf.Page") -> str:
         return "empty"
 
 
-def load_pdf(pdf_path: Union[str, Path]) -> List[Document]:
+def load_pdf(pdf_path: Union[str, Path], strict: bool = False) -> List[Document]:
     """Extract non-empty pages from one PDF as a list of documents.
 
     Each document has: text, source (filename), page (1-indexed), total_pages.
     Empty or scanned (image-only) pages are skipped with a log message.
+
+    In strict mode, unreadable files and page extraction failures raise instead
+    of returning partial results. Indexing uses this to avoid pruning records
+    based on an incomplete extraction.
     """
     pdf_path = Path(pdf_path)
     documents: List[Document] = []
@@ -47,6 +51,10 @@ def load_pdf(pdf_path: Union[str, Path]) -> List[Document]:
         with pymupdf.open(pdf_path) as pdf:
             if pdf.needs_pass:
                 logger.error("%s is password-protected, skipping", pdf_path.name)
+                if strict:
+                    raise RuntimeError(
+                        f"{pdf_path.name} is password-protected and cannot be indexed."
+                    )
                 return []
 
             total_pages = pdf.page_count
@@ -57,6 +65,10 @@ def load_pdf(pdf_path: Union[str, Path]) -> List[Document]:
                     text = clean_text(page.get_text("text"))
                 except Exception as exc:  # corrupted page
                     logger.warning("%s p.%d: extraction failed (%s)", pdf_path.name, page_number, exc)
+                    if strict:
+                        raise RuntimeError(
+                            f"Text extraction failed for {pdf_path.name} page {page_number}."
+                        ) from exc
                     continue
 
                 if not text:
@@ -76,11 +88,16 @@ def load_pdf(pdf_path: Union[str, Path]) -> List[Document]:
                 )
     except Exception as exc:  # unreadable/corrupt file
         logger.error("Could not open %s: %s", pdf_path.name, exc)
+        if strict:
+            raise RuntimeError(f"Could not extract {pdf_path.name}.") from exc
 
     return documents
 
 
-def load_all_pdfs(directory: Union[str, Path] = DATASHEET_DIR) -> List[Document]:
+def load_all_pdfs(
+    directory: Union[str, Path] = DATASHEET_DIR,
+    strict: bool = False,
+) -> List[Document]:
     """Load every PDF in a directory (sorted by name) into a flat list of documents."""
     directory = Path(directory)
     if not directory.is_dir():
@@ -95,7 +112,7 @@ def load_all_pdfs(directory: Union[str, Path] = DATASHEET_DIR) -> List[Document]
 
     documents: List[Document] = []
     for pdf_file in pdf_files:
-        pdf_docs = load_pdf(pdf_file)
+        pdf_docs = load_pdf(pdf_file, strict=strict)
         logger.info("Loaded %d text pages from %s", len(pdf_docs), pdf_file.name)
         documents.extend(pdf_docs)
 

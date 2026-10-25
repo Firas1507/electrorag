@@ -14,16 +14,17 @@ Three layers, reported separately so a failure says exactly what is wrong:
 2. COVERAGE  - an answer must contain citations (unless it is the configured
                "not found" message), and every sentence that states a
                measurement (a number with a unit) must carry a citation.
-3. SUPPORT   - every number in a cited measurement sentence must literally
-               appear in the text of the cited page(s) of the context.
+3. SUPPORT   - measurement values must appear in cited-page text; claims with
+               multiple content terms must also share terminology with that
+               text.
 
 What this does NOT do
 ---------------------
-Layer 3 is a NUMERIC PRESENCE check, not semantic verification. It cannot tell
-that a number on the cited page belongs to the right parameter, row or
-condition, and it does not judge claims that contain no number-with-unit
-(those are only required to be covered by at least one citation somewhere in
-the answer). Number-with-unit detection uses a fixed unit list (see _UNIT).
+Support checks are conservative heuristics, not semantic verification. Numeric
+presence and lexical overlap cannot prove that a value belongs to the right
+parameter, row or condition, nor reliably resolve paraphrases. Claims without
+numbers are checked for basic terminology overlap only. Number-with-unit
+detection uses a fixed unit list (see _UNIT).
 """
 
 import math
@@ -57,7 +58,21 @@ _MEASUREMENT_RE = re.compile(
     re.IGNORECASE,
 )
 _NUMBER_TOKEN_RE = re.compile(r"\d+(?:[.,]\d+)?")
+_CLAIM_TERM_RE = re.compile(r"[A-Za-z]+(?:-[A-Za-z]+)*")
+_UNIT_ONLY_RE = re.compile(rf"^{_UNIT}$", re.IGNORECASE)
 _SCALES = (1.0, 1e3, 1e-3, 1e6, 1e-6, 1e9, 1e-9)
+_CLAIM_STOP_WORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "been", "being",
+    "by", "can", "could", "did", "do", "does", "for", "from", "had",
+    "has", "have", "he", "her", "here", "hers", "him", "his", "how",
+    "i", "in", "into", "is", "it", "its", "may", "might", "must",
+    "of", "on", "or", "our", "ours", "she", "should", "that", "the",
+    "their", "them", "these", "they", "this", "those", "through", "to",
+    "up", "us", "was", "we", "were", "what", "when", "where", "which",
+    "who", "why", "will", "with", "would", "you", "your",
+    "value", "values", "min", "minimum", "max", "maximum", "typ", "typical",
+    "nominal", "absolute", "recommended", "operating", "range",
+}
 
 
 @dataclass
@@ -128,6 +143,18 @@ def _claim_numbers(text):
             else:
                 values.append(float(token.replace(",", ".")))
     return values
+
+
+def _claim_terms(text):
+    """Return content words used for conservative lexical evidence matching."""
+    return {
+        token.lower()
+        for token in _CLAIM_TERM_RE.findall(_PLACEHOLDER_RE.sub(" ", text))
+        if len(token) > 1
+        and not _UNIT_ONLY_RE.fullmatch(token)
+        and token.lower() not in _CLAIM_STOP_WORDS
+        and not any(character.isdigit() for character in token)
+    }
 
 
 def _is_supported(value, page_numbers):
@@ -230,16 +257,16 @@ def validate_citations(
     for unit in _claim_units(protected):
         claim_text = _PLACEHOLDER_RE.sub(" ", unit)
         numbers = _claim_numbers(claim_text)
-        if not numbers:
-            continue
-
         indices = [int(i) for i in _PLACEHOLDER_RE.findall(unit)]
+        if claim_text.rstrip().endswith(":"):
+            continue
         if not indices:
-            report.coverage.append(f"uncited claim: \"{_snippet(unit)}\"")
+            if numbers or _claim_terms(claim_text):
+                report.coverage.append(f"uncited claim: \"{_snippet(unit)}\"")
             continue
 
-        # --- support: numbers must appear on the cited page(s) --------------
-        page_numbers, found_any_page = [], False
+        # --- support: cited records must contain the claim's evidence -------
+        page_numbers, evidence_terms, found_any_page = [], set(), False
         for i in indices:
             source, page = cited[i]
             texts = pages.get((source.lower(), page))
@@ -248,15 +275,27 @@ def validate_citations(
             found_any_page = True
             for text in texts:
                 page_numbers.extend(_plain_numbers(text))
+                evidence_terms.update(_claim_terms(text))
+
         if not found_any_page:
             continue
 
-        missing = sorted({v for v in numbers if not _is_supported(v, page_numbers)})
-        if missing:
-            shown = ", ".join(f"{v:g}" for v in missing)
+        if numbers:
+            missing = sorted(
+                {v for v in numbers if not _is_supported(v, page_numbers)}
+            )
+            if missing:
+                shown = ", ".join(f"{v:g}" for v in missing)
+                report.support.append(
+                    f"claim not supported by its cited page(s): \"{_snippet(unit)}\" "
+                    f"(value(s) {shown} not found there)"
+                )
+
+        claim_terms = _claim_terms(claim_text)
+        if len(claim_terms) >= 2 and not claim_terms.intersection(evidence_terms):
             report.support.append(
-                f"claim not supported by its cited page(s): \"{_snippet(unit)}\" "
-                f"(value(s) {shown} not found there)"
+                f"claim terminology not found on its cited page(s): "
+                f"\"{_snippet(unit)}\""
             )
 
     return report

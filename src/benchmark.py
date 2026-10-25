@@ -27,6 +27,7 @@ from src.chunker import chunk_documents
 from src.embeddings import load_model
 from src.citation_validation import validate_citations
 from src.generator import (
+    NOT_FOUND_MESSAGE,
     build_evidence_index,
     generate_answer,
     normalize_records,
@@ -182,7 +183,6 @@ QUESTIONS = [
                 "values": [
                     "current",
                     "mA",
-                    "A",
                 ],
             },
         ],
@@ -252,8 +252,11 @@ QUESTIONS = [
         "source": "MAX98357A.pdf",
         "expected_facts": [
             {
-                "type": "value",
-                "value": 4,
+                "type": "list",
+                "values": [
+                    4,
+                    8,
+                ],
                 "unit": "Ω",
             },
         ],
@@ -265,11 +268,15 @@ QUESTIONS = [
         "source": "MAX98357A.pdf",
         "expected_facts": [
             {
-                "type": "contains_any",
+                "type": "list",
                 "values": [
-                    "gain",
-                    "dB",
+                    15,
+                    12,
+                    9,
+                    6,
+                    3,
                 ],
+                "unit": "dB",
             },
         ],
     },
@@ -383,12 +390,16 @@ def normalize_text(text):
 _NUMBER_CORE = r"[+-]?(?:\d+(?:\.\d+)?|\.\d+)"
 _UNIT_CORE = (
     r"(?:°\s*c|℃|deg(?:ree)?s?\s*c|ohms?|[ΩΩ]|"
-    r"mhz|khz|hz|mv|ma|v|a)"
+    r"mhz|khz|hz|mv|ma|db|v|a)"
 )
 _MEASUREMENT_RE = re.compile(
     rf"(?<![\w.])"
     rf"(?P<values>{_NUMBER_CORE}(?:\s*/\s*{_NUMBER_CORE})*)"
     rf"\s*(?P<unit>{_UNIT_CORE})(?![a-z])",
+    re.IGNORECASE,
+)
+_TABLE_UNIT_HEADER_RE = re.compile(
+    rf"\(\s*(?P<unit>{_UNIT_CORE})\s*\)",
     re.IGNORECASE,
 )
 _RANGE_RE = re.compile(
@@ -907,7 +918,11 @@ def check_contains_any(answer, fact):
     )
 
     for value in values:
-        if normalize_text(value) in normalized_answer:
+        normalized_value = normalize_text(value).strip()
+        if len(normalized_value) < 2:
+            continue
+        pattern = rf"(?<![A-Za-z0-9]){re.escape(normalized_value)}(?![A-Za-z0-9])"
+        if re.search(pattern, normalized_answer, flags=re.IGNORECASE):
             return True, []
 
     return False, [
@@ -993,6 +1008,7 @@ def check_list_fact(answer, fact):
             [],
         )
     ]
+    expected_unit = fact.get("unit")
 
     missing = []
 
@@ -1001,7 +1017,7 @@ def check_list_fact(answer, fact):
         found = measurement_matches_expected(
             answer,
             expected,
-            fact.get("unit"),
+            expected_unit,
         )
 
         if not found:
@@ -1009,10 +1025,79 @@ def check_list_fact(answer, fact):
                 str(expected)
             )
 
+    if (
+        missing
+        and expected_unit
+        and _table_list_matches_expected(
+            answer,
+            expected_values,
+            expected_unit,
+        )
+    ):
+        missing = []
+
     return (
         len(missing) == 0,
         missing,
     )
+
+
+def _table_list_matches_expected(text, expected_values, expected_unit):
+    """Match a complete list of numeric cells under one explicit unit header."""
+    expected_dimension, _ = _canonical_measurement(0, expected_unit)
+    for unit, values in _table_measurement_blocks(text):
+        dimension, _ = _canonical_measurement(0, unit)
+        if dimension != expected_dimension:
+            continue
+
+        if all(
+            any(
+                numbers_equal(value, expected)
+                for value in values
+            )
+            for expected in expected_values
+        ):
+            return True
+
+    return False
+
+
+def _table_measurement_blocks(text):
+    """Read bare numeric cells only within a heading that explicitly names a unit."""
+    lines = [line.strip() for line in normalize_text(text).splitlines()]
+    blocks = []
+
+    for header_index, line in enumerate(lines):
+        header = _TABLE_UNIT_HEADER_RE.search(line)
+        if not header or not line[:header.start()].strip():
+            continue
+
+        end = len(lines)
+        for index in range(header_index + 1, len(lines)):
+            if (
+                _TABLE_UNIT_HEADER_RE.search(lines[index])
+                or re.match(r"^(?:table|figure)\b", lines[index], re.IGNORECASE)
+            ):
+                end = index
+                break
+
+        values = []
+        for cell_line in lines[header_index + 1:end]:
+            if re.fullmatch(_NUMBER_CORE, cell_line):
+                values.append(float(cell_line))
+                continue
+
+            row = _TABLE_LINE_RE.fullmatch(cell_line)
+            if row:
+                values.extend(
+                    float(match.group("value"))
+                    for match in _CELL_FINDER_RE.finditer(row.group("cells"))
+                    if match.group("value") != "-"
+                )
+
+        blocks.append((normalize_unit(header.group("unit")), values))
+
+    return blocks
 
 
 # ============================================================
@@ -1234,8 +1319,8 @@ def citation_validation_problems(
     Strict citation validation. Returns a list of problems (empty = valid).
 
     Every citation must resolve to a source and page present in the supplied
-    context, no unresolved [C#] may remain, every number-with-unit sentence
-    must be cited, and its numbers must appear on the cited page(s).
+    context, no unresolved [C#] may remain, and each claim must be cited and
+    pass basic numeric/terminology support checks.
     See src/citation_validation.py for exactly what is and is not verified.
     """
 
@@ -1243,7 +1328,17 @@ def citation_validation_problems(
         answer,
         _citation_context(context_records),
         expected_source=expected_source,
+        not_found_message=NOT_FOUND_MESSAGE,
     ).problems
+
+
+def is_abstention_answer(answer):
+    """Return whether the answer is exactly the configured abstention."""
+
+    return (
+        isinstance(answer, str)
+        and answer.strip() == NOT_FOUND_MESSAGE.strip()
+    )
 
 
 def citation_page_context_valid(
@@ -1253,9 +1348,10 @@ def citation_page_context_valid(
 ):
     """
     True only if the answer passes strict citation validation (identity,
-    coverage and numeric support). Previously this passed whenever ANY single
-    citation was valid, so invalid pages, unresolved [C#] references,
-    unrelated pages and uncited claims were not detected.
+    coverage and numeric support), or is the configured abstention. Previously
+    this passed whenever ANY single citation was valid, so invalid pages,
+    unresolved [C#] references, unrelated pages and uncited claims were not
+    detected.
     """
 
     return not citation_validation_problems(
@@ -1263,6 +1359,34 @@ def citation_page_context_valid(
         expected_source,
         context_records,
     )
+
+
+def summarize_citation_metrics(results):
+    """Summarize successful generations; citation denominators exclude abstentions."""
+
+    abstentions = sum(result["abstained"] for result in results)
+    answered = [result for result in results if not result["abstained"]]
+
+    return {
+        "answer_count": len(results),
+        "abstention_count": abstentions,
+        "non_abstained_count": len(answered),
+        "citation_count": sum(result["citation"] for result in answered),
+        "citation_source_count": sum(
+            result["citation_source"] for result in answered
+        ),
+        "citation_page_context_count": sum(
+            result["citation_page_context"] for result in answered
+        ),
+    }
+
+
+def format_rate(count, denominator):
+    """Format a count/rate without dividing by an empty answer set."""
+
+    if not denominator:
+        return f"{count}/{denominator} = N/A"
+    return f"{count}/{denominator} = {count / denominator * 100:.2f}%"
 
 
 def run_evaluator_self_tests():
@@ -1944,9 +2068,7 @@ def main():
     generation_nonempty = 0
     generation_content = 0
 
-    citation_count = 0
-    citation_source_count = 0
-    citation_page_context_count = 0
+    citation_results = []
 
     failed_retrieval = []
     failed_generation = []
@@ -2254,6 +2376,7 @@ def main():
                 )
 
             answer = answer.strip()
+            abstained = is_abstention_answer(answer)
 
             print()
             print("Answer:")
@@ -2289,34 +2412,29 @@ def main():
             # Citation presence
             # ------------------------------------------------
 
-            citation_pass = citation_present(
-                answer
-            )
-
-            if citation_pass:
-                citation_count += 1
-
-            # ------------------------------------------------
-            # Citation source
-            # ------------------------------------------------
-
-            citation_source_pass = (
-                correct_citation_source(
+            citation_pass = None
+            citation_source_pass = None
+            citation_page_context_pass = None
+            if not abstained:
+                citation_pass = citation_present(answer)
+                citation_source_pass = correct_citation_source(
+                    answer, expected_source
+                )
+                citation_page_context_pass = citation_page_context_valid(
                     answer,
                     expected_source,
+                    top_records,
                 )
+            citation_results.append(
+                {
+                    "abstained": abstained,
+                    "citation": citation_pass or False,
+                    "citation_source": citation_source_pass or False,
+                    "citation_page_context": (
+                        citation_page_context_pass or False
+                    ),
+                }
             )
-
-            if citation_source_pass:
-                citation_source_count += 1
-
-            citation_page_context_pass = citation_page_context_valid(
-                answer,
-                expected_source,
-                top_records,
-            )
-            if citation_page_context_pass:
-                citation_page_context_count += 1
 
             # ------------------------------------------------
             # Print evaluation
@@ -2332,6 +2450,11 @@ def main():
             print(
                 f"Expected content: "
                 f"{'PASS' if content_pass else 'FAIL'}"
+            )
+
+            print(
+                f"Abstention: "
+                f"{'YES' if abstained else 'NO'}"
             )
 
             if not content_pass:
@@ -2371,20 +2494,20 @@ def main():
 
             print(
                 f"Citation syntax present: "
-                f"{'PASS' if citation_pass else 'FAIL'}"
+                f"{'N/A (abstained)' if citation_pass is None else ('PASS' if citation_pass else 'FAIL')}"
             )
 
             print(
                 f"Citation source correct: "
-                f"{'PASS' if citation_source_pass else 'FAIL'}"
+                f"{'N/A (abstained)' if citation_source_pass is None else ('PASS' if citation_source_pass else 'FAIL')}"
             )
 
             print(
                 f"Citation page/context valid: "
-                f"{'PASS' if citation_page_context_pass else 'FAIL'}"
+                f"{'N/A (abstained)' if citation_page_context_pass is None else ('PASS' if citation_page_context_pass else 'FAIL')}"
             )
 
-            if not citation_page_context_pass:
+            if citation_page_context_pass is False:
                 for citation_problem in citation_validation_problems(
                     answer,
                     expected_source,
@@ -2399,9 +2522,9 @@ def main():
             if (
                 not nonempty
                 or not content_pass
-                or not citation_pass
-                or not citation_source_pass
-                or not citation_page_context_pass
+                or citation_pass is False
+                or citation_source_pass is False
+                or citation_page_context_pass is False
                 or not candidate_fact_pass
                 or not top5_fact_pass
             ):
@@ -2415,6 +2538,7 @@ def main():
                         "id": question_id,
                         "nonempty": nonempty,
                         "content": content_pass,
+                        "abstained": abstained,
                         "citation": citation_pass,
                         "citation_source": citation_source_pass,
                         "citation_page_context": citation_page_context_pass,
@@ -2444,6 +2568,7 @@ def main():
                     "id": question_id,
                     "nonempty": False,
                     "content": False,
+                    "abstained": False,
                     "citation": False,
                     "citation_source": False,
                     "citation_page_context": False,
@@ -2468,6 +2593,7 @@ def main():
     total = len(
         QUESTIONS
     )
+    citation_metrics = summarize_citation_metrics(citation_results)
 
     print()
     print()
@@ -2542,21 +2668,25 @@ def main():
     )
 
     print(
-        f"Citation syntax present: "
-        f"{citation_count}/{total} = "
-        f"{citation_count / total * 100:.2f}%"
+        f"Abstentions: "
+        f"{citation_metrics['abstention_count']}/{total} = "
+        f"{citation_metrics['abstention_count'] / total * 100:.2f}%"
+    )
+    print("Citation metric denominators exclude abstentions and generation errors.")
+
+    print(
+        f"Citation syntax present (non-abstained answers): "
+        f"{format_rate(citation_metrics['citation_count'], citation_metrics['non_abstained_count'])}"
     )
 
     print(
-        f"Citation source correct: "
-        f"{citation_source_count}/{total} = "
-        f"{citation_source_count / total * 100:.2f}%"
+        f"Citation source correct (non-abstained answers): "
+        f"{format_rate(citation_metrics['citation_source_count'], citation_metrics['non_abstained_count'])}"
     )
 
     print(
-        f"Citation page/context valid: "
-        f"{citation_page_context_count}/{total} = "
-        f"{citation_page_context_count / total * 100:.2f}%"
+        f"Citation page/context valid (non-abstained answers): "
+        f"{format_rate(citation_metrics['citation_page_context_count'], citation_metrics['non_abstained_count'])}"
     )
 
     # ========================================================
@@ -2612,6 +2742,11 @@ def main():
                 f"{'PASS' if failure['content'] else 'FAIL'}"
             )
 
+            print(
+                f"  Abstention: "
+                f"{'YES' if failure['abstained'] else 'NO'}"
+            )
+
             if failure[
                 "fact_failures"
             ]:
@@ -2635,17 +2770,17 @@ def main():
 
             print(
                 f"  Citation syntax present: "
-                f"{'PASS' if failure['citation'] else 'FAIL'}"
+                f"{'N/A (abstained)' if failure['citation'] is None else ('PASS' if failure['citation'] else 'FAIL')}"
             )
 
             print(
                 f"  Citation source correct: "
-                f"{'PASS' if failure['citation_source'] else 'FAIL'}"
+                f"{'N/A (abstained)' if failure['citation_source'] is None else ('PASS' if failure['citation_source'] else 'FAIL')}"
             )
 
             print(
                 f"  Citation page/context: "
-                f"{'PASS' if failure['citation_page_context'] else 'FAIL'}"
+                f"{'N/A (abstained)' if failure['citation_page_context'] is None else ('PASS' if failure['citation_page_context'] else 'FAIL')}"
             )
 
             print(
